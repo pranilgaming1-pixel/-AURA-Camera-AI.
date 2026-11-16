@@ -2,14 +2,17 @@ package com.aura.camera
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 
 /**
- * Lightweight on-device enhancement for mid-range phones.
+ * AURA computational photo processing.
  *
- * This is deterministic image processing, not a generative AI model. It keeps
- * the input Bitmap untouched and returns a separate enhanced Bitmap.
+ * This is adaptive on-device image processing, not a generative or trained
+ * super-resolution model. It preserves the source bitmap and creates a new
+ * result. Processing is deliberately conservative to protect skin tones.
  */
 object PhotoEnhancer {
     data class Report(
@@ -26,71 +29,132 @@ object PhotoEnhancer {
         require(source.width > 0 && source.height > 0)
         val width = source.width
         val height = source.height
-        val input = IntArray(width * height)
-        source.getPixels(input, 0, width, 0, 0, width, height)
+        val pixels = IntArray(width * height)
+        source.getPixels(pixels, 0, width, 0, 0, width, height)
 
-        var luminanceSum = 0.0
-        var luminanceSquared = 0.0
-        val sampleStep = max(1, input.size / 12000)
+        // Analyze a distributed sample so full-resolution photos stay responsive.
+        val histogram = IntArray(256)
+        var sum = 0L
+        var sumSquared = 0.0
         var samples = 0
-        for (i in input.indices step sampleStep) {
-            val c = input[i]
-            val y = 0.2126 * Color.red(c) + 0.7152 * Color.green(c) + 0.0722 * Color.blue(c)
-            luminanceSum += y
-            luminanceSquared += y * y
+        val sampleStep = max(1, pixels.size / 18000)
+        for (i in pixels.indices step sampleStep) {
+            val c = pixels[i]
+            val y = luma(c)
+            histogram[y]++
+            sum += y
+            sumSquared += y.toDouble() * y
             samples++
         }
-        val mean = (luminanceSum / max(1, samples)).toFloat()
-        val variance = (luminanceSquared / max(1, samples) - mean * mean).coerceAtLeast(0.0)
+        val mean = sum.toFloat() / max(1, samples)
+        val variance = (sumSquared / max(1, samples) - mean * mean).coerceAtLeast(0.0)
         val contrast = kotlin.math.sqrt(variance).toFloat()
+        val low = percentile(histogram, samples, 0.025f)
+        val high = percentile(histogram, samples, 0.985f)
+        val range = (high - low).coerceAtLeast(80)
 
-        // Gentle exposure and contrast correction; intentionally conservative
-        // to avoid clipping highlights or changing skin tones aggressively.
         val exposure = when {
-            mean < 82f -> 1.12f
-            mean < 105f -> 1.07f
-            mean > 190f -> 0.96f
-            else -> 1.02f
+            mean < 62f -> 1.16f
+            mean < 88f -> 1.10f
+            mean < 112f -> 1.055f
+            mean > 205f -> 0.97f
+            else -> 1.015f
         }
         val contrastGain = when {
-            contrast < 42f -> 1.13f
-            contrast < 58f -> 1.07f
+            contrast < 34f -> 1.12f
+            contrast < 52f -> 1.075f
             else -> 1.035f
         }
-        val sharpening = if (contrast < 38f) 0.16f else 0.11f
-        val adjusted = IntArray(input.size)
+        val sharpen = when {
+            contrast < 28f -> 0.22f
+            contrast < 48f -> 0.17f
+            else -> 0.12f
+        }
 
+        // One output buffer only. A 12 MP image needs about 48 MB per IntArray.
+        val outputPixels = IntArray(pixels.size)
         for (y in 0 until height) {
+            val y0 = max(0, y - 1)
+            val y2 = min(height - 1, y + 1)
             for (x in 0 until width) {
                 val index = y * width + x
-                val original = input[index]
-                val left = input[y * width + max(0, x - 1)]
-                val right = input[y * width + min(width - 1, x + 1)]
-                val up = input[max(0, y - 1) * width + x]
-                val down = input[min(height - 1, y + 1) * width + x]
-                val r = channel(original, left, right, up, down, 16, exposure, contrastGain, sharpening)
-                val g = channel(original, left, right, up, down, 8, exposure, contrastGain, sharpening)
-                val b = channel(original, left, right, up, down, 0, exposure, contrastGain, sharpening)
-                adjusted[index] = Color.rgb(r, g, b)
+                val center = pixels[index]
+                val centerY = luma(center).toFloat()
+
+                // Edge-aware 3x3 chroma smoothing: strong in flat/noisy areas,
+                // weak across edges so hair, text and fine texture remain intact.
+                var redSum = 0f
+                var greenSum = 0f
+                var blueSum = 0f
+                var weightSum = 0f
+                var localLuma = 0f
+                var localCount = 0
+                for (ny in y0..y2) {
+                    val row = ny * width
+                    for (nx in max(0, x - 1)..min(width - 1, x + 1)) {
+                        val neighbour = pixels[row + nx]
+                        val difference = kotlin.math.abs(luma(neighbour) - centerY)
+                        val spatial = if (nx == x && ny == y) 1f else 0.72f
+                        val weight = spatial * exp(-difference / 22f)
+                        redSum += Color.red(neighbour) * weight
+                        greenSum += Color.green(neighbour) * weight
+                        blueSum += Color.blue(neighbour) * weight
+                        weightSum += weight
+                        localLuma += luma(neighbour)
+                        localCount++
+                    }
+                }
+                val smoothR = redSum / weightSum.coerceAtLeast(0.001f)
+                val smoothG = greenSum / weightSum.coerceAtLeast(0.001f)
+                val smoothB = blueSum / weightSum.coerceAtLeast(0.001f)
+                val texture = kotlin.math.abs(centerY - localLuma / localCount)
+                val denoiseMix = (0.20f - texture / 180f).coerceIn(0.035f, 0.17f)
+
+                var r = Color.red(center) * (1f - denoiseMix) + smoothR * denoiseMix
+                var g = Color.green(center) * (1f - denoiseMix) + smoothG * denoiseMix
+                var b = Color.blue(center) * (1f - denoiseMix) + smoothB * denoiseMix
+
+                // Tone-map luminance, rather than independently pushing RGB
+                // channels. This avoids the harsh, oversaturated filter look.
+                val normalized = ((centerY - low) / range).coerceIn(0f, 1f)
+                val shadowLift = 0.045f * (1f - normalized) * exp(-normalized * 3.2f)
+                val highlightRollOff = 0.035f * normalized.pow(3)
+                var mapped = (normalized + shadowLift - highlightRollOff)
+                mapped = ((mapped - 0.5f) * contrastGain + 0.5f).coerceIn(0f, 1f)
+                mapped = (mapped * 255f * exposure / 255f).coerceIn(0f, 1f)
+                // A gentle shoulder protects bright skies and faces.
+                val shoulder = if (mapped > 0.82f) 0.82f + (mapped - 0.82f) * 0.72f else mapped
+                val targetY = (shoulder * 255f).coerceIn(0f, 255f)
+
+                // Edge-aware luminance sharpening, with no aggressive colour halos.
+                val averageY = localLuma / localCount
+                val detail = centerY - averageY
+                val detailGain = if (kotlin.math.abs(detail) < 2.5f) 0f else sharpen
+                val sharpenedY = (targetY + detail * detailGain).coerceIn(0f, 255f)
+                val scale = if (centerY > 2f) sharpenedY / centerY else 1f
+                r = (r * scale).coerceIn(0f, 255f)
+                g = (g * scale).coerceIn(0f, 255f)
+                b = (b * scale).coerceIn(0f, 255f)
+
+                outputPixels[index] = Color.rgb(r.toInt(), g.toInt(), b.toInt())
             }
         }
 
         val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        output.setPixels(adjusted, 0, width, 0, 0, width, height)
-        return Result(output, Report(mean, contrast, exposure, contrastGain, sharpening))
+        output.setPixels(outputPixels, 0, width, 0, 0, width, height)
+        return Result(output, Report(mean, contrast, exposure, contrastGain, sharpen))
     }
 
-    private fun channel(
-        center: Int, left: Int, right: Int, up: Int, down: Int, shift: Int,
-        exposure: Float, contrast: Float, sharpen: Float
-    ): Int {
-        val c = (center ushr shift) and 0xFF
-        val neighbours = (((left ushr shift) and 0xFF) +
-            ((right ushr shift) and 0xFF) +
-            ((up ushr shift) and 0xFF) +
-            ((down ushr shift) and 0xFF)) / 4f
-        val detail = c - neighbours
-        val corrected = ((c - 128f) * contrast + 128f) * exposure + detail * sharpen
-        return corrected.toInt().coerceIn(0, 255)
+    private fun luma(color: Int): Int =
+        (0.2126f * Color.red(color) + 0.7152f * Color.green(color) + 0.0722f * Color.blue(color)).toInt().coerceIn(0, 255)
+
+    private fun percentile(histogram: IntArray, total: Int, fraction: Float): Int {
+        val target = (total * fraction).toInt().coerceAtLeast(1)
+        var accumulated = 0
+        for (i in histogram.indices) {
+            accumulated += histogram[i]
+            if (accumulated >= target) return i
+        }
+        return 255
     }
 }
