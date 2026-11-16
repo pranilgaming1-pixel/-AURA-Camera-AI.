@@ -12,8 +12,11 @@ android {
         applicationId = "com.aura.camera"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
+        // Galaxy A16 5G uses 64-bit ARM. Excluding unused emulator/32-bit
+        // native libraries keeps the install package substantially smaller.
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     buildFeatures { compose = true }
@@ -45,5 +48,4 @@ dependencies {
     implementation("androidx.camera:camera-view:$cameraX")
 
     implementation("com.google.mlkit:image-labeling:17.0.9")
-    implementation("com.google.mlkit:face-detection:16.1.7")
 }
