@@ -83,6 +83,7 @@ private fun AuraCameraScreen() {
     var capture by remember { mutableStateOf<(() -> Unit)?>(null) }
     var configure by remember { mutableStateOf<((String, Float, Float) -> Unit)?>(null) }
     var aiText by remember { mutableStateOf("AI CAMERA READY") }
+    var sceneHint by remember { mutableStateOf("AUTO") }
     var brightness by remember { mutableIntStateOf(0) }
     var histogram by remember { mutableStateOf(List(48) { 0f }) }
     var original by remember { mutableStateOf<Bitmap?>(null) }
@@ -112,7 +113,7 @@ private fun AuraCameraScreen() {
                 try {
                     val bmp = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
                     if (bmp == null) throw IllegalStateException("Image could not be opened")
-                    val edit = PhotoEnhancer.enhance(bmp)
+                    val edit = PhotoEnhancer.enhance(bmp, sceneHint)
                     ContextCompat.getMainExecutor(context).execute {
                         original = bmp
                         enhanced = edit.bitmap
@@ -168,13 +169,17 @@ private fun AuraCameraScreen() {
                                 onCaptureReady = { capture = it },
                                 onConfigure = { configure = it },
                                 onAnalysis = { bins, mean -> histogram = bins; brightness = mean },
-                                onAi = { aiText = it },
-                                onPhoto = { file ->
+                                sceneHint = sceneHint,
+                                onAi = { label ->
+                                    aiText = label
+                                    sceneHint = label.substringAfter("AI ·", "AUTO").trim().ifBlank { "AUTO" }
+                                },
+                                onPhoto = { file, detectedScene ->
                                     processing = true
                                     worker.execute {
                                         try {
                                             val bmp = BitmapFactory.decodeFile(file.absolutePath) ?: throw IllegalStateException("Photo decode failed")
-                                            val edit = PhotoEnhancer.enhance(bmp)
+                                            val edit = PhotoEnhancer.enhance(bmp, detectedScene)
                                             ContextCompat.getMainExecutor(context).execute {
                                                 original = bmp; enhanced = edit.bitmap
                                                 resultText = "Enhanced · exposure ${edit.report.appliedExposure}× · fine detail"
@@ -190,7 +195,7 @@ private fun AuraCameraScreen() {
                         if (grid) RuleOfThirds(Modifier.fillMaxSize())
                         Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                             GlassPill(if (processing) "PROCESSING PHOTO" else "● LIVE VIEW", if (processing) Gold else Color(0xFFB9F4D0))
-                            GlassPill("HDR AUTO", White)
+                            GlassPill("SMART TONE", White)
                         }
                         GlassPill(aiText, Gold, Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp))
                     }
@@ -401,10 +406,12 @@ private fun CameraPreview(
     onCaptureReady: (() -> Unit) -> Unit,
     onConfigure: ((String, Float, Float) -> Unit) -> Unit,
     onAnalysis: (List<Float>, Int) -> Unit,
+    sceneHint: String,
     onAi: (String) -> Unit,
-    onPhoto: (File) -> Unit
+    onPhoto: (File, String) -> Unit
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
+    val latestSceneHint by rememberUpdatedState(sceneHint)
     AndroidView(modifier = modifier, factory = { ctx ->
         val previewView = PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FILL_CENTER }
         val executor = Executors.newSingleThreadExecutor()
@@ -461,7 +468,7 @@ private fun CameraPreview(
                         ImageCapture.OutputFileOptions.Builder(output).build(),
                         ContextCompat.getMainExecutor(ctx),
                         object : ImageCapture.OnImageSavedCallback {
-                            override fun onImageSaved(results: ImageCapture.OutputFileResults) { onPhoto(output) }
+                            override fun onImageSaved(results: ImageCapture.OutputFileResults) { onPhoto(output, latestSceneHint) }
                             override fun onError(exception: ImageCaptureException) { onAi("CAPTURE ERROR · ${exception.message ?: "TRY AGAIN"}") }
                         }
                     )
