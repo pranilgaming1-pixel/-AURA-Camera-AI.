@@ -7,6 +7,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -16,10 +17,10 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
-import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -35,7 +36,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -45,21 +49,25 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.label.ImageLabeling
 import com.google.mlkit.vision.label.defaults.ImageLabelerOptions
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-private val Ink = Color(0xFF050608)
-private val Panel = Color(0xFF17191D)
-private val Muted = Color(0xFF9B9DA3)
-private val Accent = Color(0xFFFFD36A)
+private val Black = Color(0xFF050607)
+private val Glass = Color(0xCC17191D)
+private val White = Color(0xFFF7F7F5)
+private val Soft = Color(0xFF9A9DA5)
+private val Gold = Color(0xFFFFD36A)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.statusBarColor = android.graphics.Color.BLACK
+        window.navigationBarColor = android.graphics.Color.BLACK
         setContent { AuraCameraScreen() }
     }
 }
@@ -68,191 +76,211 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun AuraCameraScreen() {
     val context = LocalContext.current
-    var hasPermission by remember {
-        mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
-    }
-    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { hasPermission = it }
-    var captureAction by remember { mutableStateOf<(() -> Unit)?>(null) }
-    var cameraSettings by remember { mutableStateOf<((Boolean, Float) -> Unit)?>(null) }
-    var labels by remember { mutableStateOf("AURA CAMERA") }
-    var histogram by remember { mutableStateOf(List(64) { 0f }) }
+    val haptics = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
+    var permission by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }
+    val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { permission = it }
+    var capture by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var configure by remember { mutableStateOf<((String, Float, Float) -> Unit)?>(null) }
+    var aiText by remember { mutableStateOf("AI CAMERA READY") }
     var brightness by remember { mutableIntStateOf(0) }
+    var histogram by remember { mutableStateOf(List(48) { 0f }) }
     var original by remember { mutableStateOf<Bitmap?>(null) }
     var enhanced by remember { mutableStateOf<Bitmap?>(null) }
-    var report by remember { mutableStateOf("Your photo, naturally enhanced.") }
-    var busy by remember { mutableStateOf(false) }
+    var resultText by remember { mutableStateOf("Natural detail enhancement") }
+    var processing by remember { mutableStateOf(false) }
     var showEnhanced by remember { mutableStateOf(true) }
-    var flashOn by remember { mutableStateOf(false) }
-    var timer by remember { mutableIntStateOf(0) }
-    var ratio by remember { mutableStateOf("4:3") }
+    var flash by remember { mutableStateOf("AUTO") }
     var zoom by remember { mutableFloatStateOf(1f) }
+    var exposure by remember { mutableFloatStateOf(0f) }
+    var timer by remember { mutableIntStateOf(0) }
+    var grid by remember { mutableStateOf(false) }
+    var ratio by remember { mutableStateOf("4:3") }
     var mode by remember { mutableStateOf("PHOTO") }
-    var showOptions by remember { mutableStateOf(false) }
-    var selectedLook by remember { mutableStateOf("Natural") }
+    var backCamera by remember { mutableStateOf(true) }
+    var optionsOpen by remember { mutableStateOf(false) }
+    var countdown by remember { mutableIntStateOf(0) }
     val worker = remember { Executors.newSingleThreadExecutor() }
 
-    LaunchedEffect(flashOn, zoom) { cameraSettings?.invoke(flashOn, zoom) }
+    LaunchedEffect(Unit) { if (!permission) permissionRequest.launch(Manifest.permission.CAMERA) }
+    LaunchedEffect(flash, zoom, exposure) { configure?.invoke(flash, zoom, exposure) }
 
     val galleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
-            busy = true
+            processing = true
             worker.execute {
                 try {
-                    val bitmap = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
-                    if (bitmap != null) {
-                        val result = PhotoEnhancer.enhance(bitmap)
-                        ContextCompat.getMainExecutor(context).execute {
-                            original = bitmap; enhanced = result.bitmap
-                            report = "AURA enhanced your photo · natural light and detail"
-                            busy = false
-                        }
-                    } else ContextCompat.getMainExecutor(context).execute { busy = false; report = "Could not open this image" }
+                    val bmp = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+                    if (bmp == null) throw IllegalStateException("Image could not be opened")
+                    val edit = PhotoEnhancer.enhance(bmp)
+                    ContextCompat.getMainExecutor(context).execute {
+                        original = bmp
+                        enhanced = edit.bitmap
+                        resultText = "AURA · natural light and detail"
+                        processing = false
+                    }
                 } catch (e: Exception) {
-                    ContextCompat.getMainExecutor(context).execute { busy = false; report = "Enhancement failed: ${e.message ?: "unknown error"}" }
+                    ContextCompat.getMainExecutor(context).execute { processing = false; resultText = e.message ?: "Enhancement failed" }
                 }
             }
         }
     }
 
-    LaunchedEffect(Unit) { if (!hasPermission) permissionLauncher.launch(Manifest.permission.CAMERA) }
-
-    MaterialTheme(colorScheme = darkColorScheme(primary = Accent, background = Ink, surface = Panel)) {
-        if (original == null) {
-            Column(Modifier.fillMaxSize().background(Ink).padding(horizontal = 14.dp, vertical = 10.dp)) {
-                // Minimal iPhone-inspired top camera bar.
-                Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("AURA", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 3.sp)
+    MaterialTheme(colorScheme = darkColorScheme(primary = Gold, background = Black, surface = Glass)) {
+        if (original != null && enhanced != null) {
+            ResultScreen(
+                original = original!!,
+                enhanced = enhanced!!,
+                showEnhanced = showEnhanced,
+                onToggle = { showEnhanced = it },
+                message = resultText,
+                onRetake = { original = null; enhanced = null; showEnhanced = true },
+                onSave = {
+                    val first = saveBitmap(context, original!!, "AURA_Original")
+                    val second = saveBitmap(context, enhanced!!, "AURA_Enhanced")
+                    resultText = if (first && second) "Saved both photos to Pictures/AURA" else "Could not save. Check available storage."
+                }
+            )
+        } else {
+            Column(Modifier.fillMaxSize().background(Black).padding(horizontal = 16.dp)) {
+                // Premium control strip
+                Row(Modifier.fillMaxWidth().height(58.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column {
+                        Text("AURA", color = White, fontSize = 21.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
+                        Text("COMPUTATIONAL CAMERA", color = Soft, fontSize = 8.sp, letterSpacing = 1.5.sp)
+                    }
                     Spacer(Modifier.weight(1f))
-                    RoundControl(if (flashOn) "⚡" else "ϟ", flashOn) { flashOn = !flashOn }
-                    Spacer(Modifier.width(10.dp))
-                    RoundControl("⌁", false) { timer = when (timer) { 0 -> 3; 3 -> 10; else -> 0 } }
-                    Spacer(Modifier.width(10.dp))
-                    RoundControl("⋯", false) { showOptions = true }
+                    TopChip(flash, flash != "OFF") {
+                        flash = when (flash) { "AUTO" -> "ON"; "ON" -> "OFF"; else -> "AUTO" }
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    TopIcon("▦", grid) { grid = !grid }
+                    Spacer(Modifier.width(8.dp))
+                    TopIcon("⚙", false) { optionsOpen = true }
                 }
 
-                if (hasPermission) {
-                    Box(Modifier.weight(1f).fillMaxWidth().padding(top = 8.dp, bottom = 8.dp)) {
-                        CameraPreview(
-                            modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(26.dp)),
-                            onCaptureReady = { captureAction = it },
-                            onCameraReady = { action -> cameraSettings = action },
-                            onAnalysis = { bins, mean -> histogram = bins; brightness = mean },
-                            onLabels = { labels = it },
-                            onPhoto = { file ->
-                                busy = true
-                                worker.execute {
-                                    try {
-                                        val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: throw IllegalStateException("Photo could not be decoded")
-                                        val result = PhotoEnhancer.enhance(bitmap)
-                                        ContextCompat.getMainExecutor(context).execute {
-                                            original = bitmap; enhanced = result.bitmap
-                                            report = "AURA optimized · exposure ${result.report.appliedExposure}× · natural detail"
-                                            busy = false
+                if (permission) {
+                    Box(Modifier.weight(1f).fillMaxWidth().padding(top = 4.dp, bottom = 10.dp).clip(RoundedCornerShape(30.dp))) {
+                        key(backCamera) {
+                            CameraPreview(
+                                modifier = Modifier.fillMaxSize(),
+                                backCamera = backCamera,
+                                onCaptureReady = { capture = it },
+                                onConfigure = { configure = it },
+                                onAnalysis = { bins, mean -> histogram = bins; brightness = mean },
+                                onAi = { aiText = it },
+                                onPhoto = { file ->
+                                    processing = true
+                                    worker.execute {
+                                        try {
+                                            val bmp = BitmapFactory.decodeFile(file.absolutePath) ?: throw IllegalStateException("Photo decode failed")
+                                            val edit = PhotoEnhancer.enhance(bmp)
+                                            ContextCompat.getMainExecutor(context).execute {
+                                                original = bmp; enhanced = edit.bitmap
+                                                resultText = "Enhanced · exposure ${edit.report.appliedExposure}× · fine detail"
+                                                processing = false
+                                            }
+                                        } catch (e: Exception) {
+                                            ContextCompat.getMainExecutor(context).execute { processing = false; aiText = e.message ?: "Capture processing failed" }
                                         }
-                                    } catch (e: Exception) {
-                                        ContextCompat.getMainExecutor(context).execute { busy = false; report = "Could not enhance photo: ${e.message}" }
                                     }
                                 }
-                            }
-                        )
-                        // Camera information is deliberately subtle, overlaid on the preview.
-                        Surface(Modifier.align(Alignment.TopStart).padding(12.dp), color = Color(0x99000000), shape = RoundedCornerShape(18.dp)) {
-                            Text(if (busy) "  ENHANCING…  " else "  ◉ LIVE  ", color = Color.White, fontSize = 11.sp, modifier = Modifier.padding(vertical = 7.dp, horizontal = 3.dp))
+                            )
                         }
-                        Surface(Modifier.align(Alignment.BottomCenter).padding(12.dp), color = Color(0x99000000), shape = RoundedCornerShape(18.dp)) {
-                            Text(labels, color = Color.White, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp), maxLines = 1)
+                        if (grid) RuleOfThirds(Modifier.fillMaxSize())
+                        Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                            GlassPill(if (processing) "PROCESSING PHOTO" else "● LIVE VIEW", if (processing) Gold else Color(0xFFB9F4D0))
+                            GlassPill("HDR AUTO", White)
+                        }
+                        GlassPill(aiText, Gold, Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp))
+                    }
+
+                    // Exposure and live meter
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("−", color = White, fontSize = 17.sp)
+                        Slider(
+                            value = exposure, onValueChange = { exposure = it },
+                            valueRange = -2f..2f, modifier = Modifier.weight(1f).height(30.dp),
+                            colors = SliderDefaults.colors(thumbColor = Gold, activeTrackColor = Gold, inactiveTrackColor = Color(0xFF42444A))
+                        )
+                        Text("+", color = White, fontSize = 17.sp)
+                        Text(String.format(Locale.US, "  %.1f EV", exposure), color = Soft, fontSize = 10.sp)
+                    }
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("LIGHT", color = Soft, fontSize = 8.sp, letterSpacing = 1.sp)
+                        Spacer(Modifier.width(8.dp))
+                        MiniHistogram(histogram, Modifier.weight(1f).height(20.dp))
+                        Text("  $brightness", color = Soft, fontSize = 9.sp)
+                    }
+                    Spacer(Modifier.height(8.dp))
+
+                    // Zoom selector
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                        listOf(0.5f, 1f, 2f, 4f).forEach { factor ->
+                            val label = if (factor == 0.5f) "0.5×" else "${factor.toInt()}×"
+                            Box(Modifier.padding(horizontal = 5.dp).clip(CircleShape)
+                                .background(if (zoom == factor) Color(0xFF3C3425) else Color(0xFF191B20))
+                                .clickable { zoom = factor }.padding(horizontal = 15.dp, vertical = 9.dp), contentAlignment = Alignment.Center) {
+                                Text(label, color = if (zoom == factor) Gold else White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    // Mode wheel
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                        listOf("NIGHT", "PORTRAIT", "PHOTO", "VIDEO").forEach { item ->
+                            Text(item, color = if (mode == item) White else Soft, fontSize = if (mode == item) 12.sp else 10.sp,
+                                fontWeight = if (mode == item) FontWeight.Bold else FontWeight.Medium,
+                                modifier = Modifier.clickable { mode = item }.padding(horizontal = 14.dp, vertical = 10.dp))
                         }
                     }
 
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                        listOf(1f, 2f, 4f).forEach { factor ->
-                            val active = zoom == factor
-                            Text(if (factor == 1f) "1×" else "${factor.toInt()}×",
-                                color = if (active) Accent else Color.White,
-                                fontSize = 13.sp, fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-                                modifier = Modifier.clip(CircleShape).background(if (active) Color(0xFF35302A) else Color.Transparent)
-                                    .clickable { zoom = factor }.padding(horizontal = 14.dp, vertical = 8.dp))
+                    // Shutter dock
+                    Row(Modifier.fillMaxWidth().height(94.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                        DockButton("▧", "GALLERY") { galleryPicker.launch("image/*") }
+                        Box(Modifier.size(78.dp).clip(CircleShape).background(White).padding(5.dp)
+                            .clip(CircleShape).background(Black).padding(3.dp).clip(CircleShape)
+                            .background(White).clickable(enabled = capture != null && !processing) {
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                scope.launch {
+                                    if (timer > 0) {
+                                        for (n in timer downTo 1) { countdown = n; delay(1000) }
+                                        countdown = 0
+                                    }
+                                    capture?.invoke()
+                                }
+                            }, contentAlignment = Alignment.Center) {
+                            if (countdown > 0) Text("$countdown", color = Black, fontSize = 25.sp, fontWeight = FontWeight.Bold)
                         }
+                        DockButton("⇄", "FLIP") { backCamera = !backCamera }
                     }
-                    Spacer(Modifier.height(4.dp))
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("HISTOGRAM", color = Muted, fontSize = 9.sp, letterSpacing = 1.sp)
-                        Text("LIGHT  $brightness/255", color = Muted, fontSize = 9.sp)
-                    }
-                    Histogram(histogram, Modifier.fillMaxWidth().height(25.dp))
-                    Spacer(Modifier.height(6.dp))
-                    ModeSelector(mode) { mode = it }
-                    Spacer(Modifier.height(10.dp))
-                    Row(Modifier.fillMaxWidth().height(78.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(64.dp).clickable { galleryPicker.launch("image/*") }) {
-                            Text("▧", color = Color.White, fontSize = 25.sp)
-                            Text("Gallery", color = Muted, fontSize = 10.sp)
-                        }
-                        Box(Modifier.size(76.dp).clip(CircleShape).background(Color.White).padding(5.dp).clip(CircleShape)
-                            .background(Accent).clickable(enabled = captureAction != null && !busy) { captureAction?.invoke() },
-                            contentAlignment = Alignment.Center) {
-                            Box(Modifier.size(58.dp).clip(CircleShape).background(Color.White))
-                        }
-                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(64.dp).clickable { showOptions = true }) {
-                            Text("◉", color = Color.White, fontSize = 25.sp)
-                            Text("Options", color = Muted, fontSize = 10.sp)
-                        }
-                    }
+                    Text("AURA IMAGE ENGINE", color = Color(0xFF656971), fontSize = 8.sp, letterSpacing = 2.sp,
+                        modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 8.dp))
                 } else {
                     Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) { Text("Allow camera access") }
+                        Button(onClick = { permissionRequest.launch(Manifest.permission.CAMERA) }) { Text("Allow camera access") }
                     }
                 }
-                Text("AURA AI  ·  NATURAL PHOTO ENHANCEMENT", color = Color(0xFF777A80), fontSize = 9.sp, letterSpacing = 1.2.sp,
-                    modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 5.dp))
             }
-        } else {
-            Column(Modifier.fillMaxSize().background(Ink).padding(16.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("AURA", color = Color.White, fontSize = 22.sp, letterSpacing = 3.sp)
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = { original = null; enhanced = null; showEnhanced = true }) { Text("Retake", color = Accent) }
-                }
-                Text("YOUR PHOTO", color = Muted, fontSize = 10.sp, letterSpacing = 2.sp)
-                Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
-                    val shown = if (showEnhanced) enhanced else original
-                    shown?.let { Image(it.asImageBitmap(), contentDescription = "Photo preview", modifier = Modifier.fillMaxWidth()) }
-                }
-                Text(report, color = Muted, fontSize = 12.sp)
-                Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(selected = !showEnhanced, onClick = { showEnhanced = false }, label = { Text("Original") })
-                    FilterChip(selected = showEnhanced, onClick = { showEnhanced = true }, label = { Text("Enhanced") })
-                }
-                Button(onClick = {
-                    val src = original; val edit = enhanced
-                    if (src != null && edit != null) {
-                        val a = saveBitmap(context, src, "AURA_Original")
-                        val b = saveBitmap(context, edit, "AURA_Enhanced")
-                        report = if (a && b) "Both versions saved to Pictures/AURA" else "Save failed. Check storage space."
+        }
+
+        if (optionsOpen) {
+            ModalBottomSheet(onDismissRequest = { optionsOpen = false }, containerColor = Color(0xFF17191D), contentColor = White) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 32.dp)) {
+                    Text("Camera settings", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    Text("Quick controls for your shot", color = Soft, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, bottom = 20.dp))
+                    SettingLabel("FLASH")
+                    ChoiceRow(listOf("AUTO", "ON", "OFF"), flash) { flash = it }
+                    SettingLabel("TIMER")
+                    ChoiceRow(listOf("OFF", "3 SEC", "10 SEC"), if (timer == 0) "OFF" else if (timer == 3) "3 SEC" else "10 SEC") {
+                        timer = when (it) { "3 SEC" -> 3; "10 SEC" -> 10; else -> 0 }
                     }
-                }, modifier = Modifier.fillMaxWidth(), enabled = !busy) { Text("Save original + enhanced") }
-            }
-        }
-
-        if (showOptions) {
-            ModalBottomSheet(onDismissRequest = { showOptions = false }, containerColor = Panel, contentColor = Color.White) {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 30.dp)) {
-                    Text("Camera options", fontSize = 21.sp, fontWeight = FontWeight.SemiBold)
-                    Text("Customize how AURA captures your photos", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, bottom = 18.dp))
-                    Text("FLASH", color = Muted, fontSize = 10.sp, letterSpacing = 1.5.sp)
-                    OptionRow(listOf("Off", "On")) { flashOn = it == "On" }
-                    Spacer(Modifier.height(14.dp))
-                    Text("TIMER", color = Muted, fontSize = 10.sp, letterSpacing = 1.5.sp)
-                    OptionRow(listOf("Off", "3 sec", "10 sec")) { timer = when (it) { "3 sec" -> 3; "10 sec" -> 10; else -> 0 } }
-                    Spacer(Modifier.height(14.dp))
-                    Text("ASPECT RATIO", color = Muted, fontSize = 10.sp, letterSpacing = 1.5.sp)
-                    OptionRow(listOf("4:3", "16:9", "1:1")) { ratio = it }
-                    Spacer(Modifier.height(14.dp))
-                    Text("PHOTO LOOK", color = Muted, fontSize = 10.sp, letterSpacing = 1.5.sp)
-                    OptionRow(listOf("Natural", "Warm", "Cool", "Vivid")) { selectedLook = it }
-                    Spacer(Modifier.height(12.dp))
-                    Text("Selected: $ratio · $selectedLook · Timer ${if (timer == 0) "off" else "$timer sec"}", color = Muted, fontSize = 11.sp)
-                    Text("Portrait and Night modes are currently interface presets; advanced depth and multi-frame night processing are not yet enabled.", color = Muted, fontSize = 10.sp, modifier = Modifier.padding(top = 12.dp))
+                    SettingLabel("ASPECT RATIO")
+                    ChoiceRow(listOf("4:3", "16:9", "1:1"), ratio) { ratio = it }
+                    SettingLabel("COMPOSITION GRID")
+                    ChoiceRow(listOf("OFF", "ON"), if (grid) "ON" else "OFF") { grid = it == "ON" }
+                    Text("Selected ratio: $ratio", color = Soft, fontSize = 11.sp, modifier = Modifier.padding(top = 16.dp))
+                    Text("The current camera sensor and Android driver determine available HDR, optical zoom and manual exposure capabilities.", color = Soft, fontSize = 10.sp, modifier = Modifier.padding(top = 10.dp))
                 }
             }
         }
@@ -260,32 +288,95 @@ private fun AuraCameraScreen() {
 }
 
 @Composable
-private fun RoundControl(symbol: String, active: Boolean, onClick: () -> Unit) {
-    Box(Modifier.size(38.dp).clip(CircleShape).background(if (active) Color(0xFF3C3425) else Panel).clickable { onClick() }, contentAlignment = Alignment.Center) {
-        Text(symbol, color = if (active) Accent else Color.White, fontSize = 18.sp)
-    }
-}
-
-@Composable
-private fun ModeSelector(mode: String, onMode: (String) -> Unit) {
-    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-        listOf("NIGHT", "PORTRAIT", "PHOTO", "VIDEO").forEach { item ->
-            Text(item, color = if (mode == item) Accent else Muted, fontSize = 11.sp, fontWeight = if (mode == item) FontWeight.Bold else FontWeight.Medium,
-                modifier = Modifier.clickable { onMode(item) }.padding(horizontal = 13.dp, vertical = 8.dp))
+private fun ResultScreen(original: Bitmap, enhanced: Bitmap, showEnhanced: Boolean, onToggle: (Boolean) -> Unit, message: String, onRetake: () -> Unit, onSave: () -> Unit) {
+    Column(Modifier.fillMaxSize().background(Black).padding(18.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("AURA", color = White, fontSize = 22.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onRetake) { Text("RETAKE", color = Gold) }
+        }
+        Text("YOUR PHOTO", color = Soft, fontSize = 10.sp, letterSpacing = 2.sp)
+        Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 14.dp), contentAlignment = Alignment.Center) {
+            Image((if (showEnhanced) enhanced else original).asImageBitmap(), contentDescription = "Photo preview", modifier = Modifier.fillMaxWidth())
+        }
+        Text(message, color = Soft, fontSize = 12.sp)
+        Row(Modifier.fillMaxWidth().padding(vertical = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = !showEnhanced, onClick = { onToggle(false) }, label = { Text("ORIGINAL") })
+            FilterChip(selected = showEnhanced, onClick = { onToggle(true) }, label = { Text("AURA ENHANCED") })
+        }
+        Button(onClick = onSave, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = White, contentColor = Black)) {
+            Text("SAVE BOTH PHOTOS", fontWeight = FontWeight.Bold)
         }
     }
 }
 
 @Composable
-private fun OptionRow(items: List<String>, onSelect: (String) -> Unit) {
-    var selected by remember(items) { mutableStateOf(items.first()) }
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF25272C)).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+private fun TopChip(text: String, active: Boolean, onClick: () -> Unit) {
+    Box(Modifier.clip(CircleShape).background(if (active) Color(0xFF383124) else Glass).clickable { onClick() }.padding(horizontal = 13.dp, vertical = 9.dp)) {
+        Text(text, color = if (active) Gold else White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun TopIcon(symbol: String, active: Boolean, onClick: () -> Unit) {
+    Box(Modifier.size(38.dp).clip(CircleShape).background(if (active) Color(0xFF383124) else Glass).clickable { onClick() }, contentAlignment = Alignment.Center) {
+        Text(symbol, color = if (active) Gold else White, fontSize = 17.sp)
+    }
+}
+
+@Composable
+private fun GlassPill(text: String, tint: Color, modifier: Modifier = Modifier) {
+    Surface(modifier, color = Color(0xCC111317), shape = CircleShape, border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x22333333))) {
+        Text(text, color = tint, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, letterSpacing = .7.sp,
+            modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp), maxLines = 1)
+    }
+}
+
+@Composable
+private fun DockButton(symbol: String, label: String, onClick: () -> Unit) {
+    Column(Modifier.width(68.dp).clickable { onClick() }, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+        Box(Modifier.size(42.dp).clip(CircleShape).background(Glass), contentAlignment = Alignment.Center) {
+            Text(symbol, color = White, fontSize = 22.sp)
+        }
+        Text(label, color = Soft, fontSize = 8.sp, letterSpacing = 1.sp, modifier = Modifier.padding(top = 4.dp))
+    }
+}
+
+@Composable
+private fun SettingLabel(text: String) {
+    Text(text, color = Soft, fontSize = 9.sp, letterSpacing = 1.5.sp, modifier = Modifier.padding(top = 18.dp, bottom = 8.dp))
+}
+
+@Composable
+private fun ChoiceRow(items: List<String>, selected: String, onSelect: (String) -> Unit) {
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(Color(0xFF25272D)).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         items.forEach { item ->
-            val active = selected == item
-            Box(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).background(if (active) Color(0xFF51452D) else Color.Transparent)
-                .clickable { selected = item; onSelect(item) }.padding(vertical = 11.dp), contentAlignment = Alignment.Center) {
-                Text(item, color = if (active) Accent else Color.White, fontSize = 12.sp)
+            Box(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).background(if (selected == item) Color(0xFF51452D) else Color.Transparent)
+                .clickable { onSelect(item) }.padding(vertical = 11.dp), contentAlignment = Alignment.Center) {
+                Text(item, color = if (selected == item) Gold else White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             }
+        }
+    }
+}
+
+@Composable
+private fun RuleOfThirds(modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val thirdW = size.width / 3f
+        val thirdH = size.height / 3f
+        for (i in 1..2) {
+            drawLine(Color(0x88FFFFFF), Offset(thirdW * i, 0f), Offset(thirdW * i, size.height), 1f)
+            drawLine(Color(0x88FFFFFF), Offset(0f, thirdH * i), Offset(size.width, thirdH * i), 1f)
+        }
+    }
+}
+
+@Composable
+private fun MiniHistogram(values: List<Float>, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val step = size.width / values.size.coerceAtLeast(1)
+        values.forEachIndexed { index, value ->
+            drawLine(Gold, Offset(index * step, size.height), Offset(index * step, size.height - value * size.height), maxOf(1f, step * .7f))
         }
     }
 }
@@ -294,100 +385,112 @@ private fun saveBitmap(context: android.content.Context, bitmap: Bitmap, prefix:
     return try {
         val name = "${prefix}_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.jpg"
         val values = ContentValues().apply {
-            put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name)
-            put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            if (Build.VERSION.SDK_INT >= 29) put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/AURA")
+            put(MediaStore.Images.Media.DISPLAY_NAME, name)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT >= 29) put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/AURA")
         }
-        val uri = context.contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return false
-        val stream = context.contentResolver.openOutputStream(uri) ?: return false
-        stream.use { bitmap.compress(Bitmap.CompressFormat.JPEG, 96, it) }
+        val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return false
+        context.contentResolver.openOutputStream(uri)?.use { bitmap.compress(Bitmap.CompressFormat.JPEG, 97, it) } ?: false
     } catch (_: Exception) { false }
 }
 
 @Composable
 private fun CameraPreview(
     modifier: Modifier,
+    backCamera: Boolean,
     onCaptureReady: (() -> Unit) -> Unit,
-    onCameraReady: ((Boolean, Float) -> Unit) -> Unit,
+    onConfigure: ((String, Float, Float) -> Unit) -> Unit,
     onAnalysis: (List<Float>, Int) -> Unit,
-    onLabels: (String) -> Unit,
+    onAi: (String) -> Unit,
     onPhoto: (File) -> Unit
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     AndroidView(modifier = modifier, factory = { ctx ->
-        val view = PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FILL_CENTER }
-        val executor: ExecutorService = Executors.newSingleThreadExecutor()
-        val future = ProcessCameraProvider.getInstance(ctx)
-        future.addListener({
-            val provider = future.get()
-            val preview = Preview.Builder().build().also { it.surfaceProvider = view.surfaceProvider }
-            val capture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).setJpegQuality(98).build()
+        val previewView = PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FILL_CENTER }
+        val executor = Executors.newSingleThreadExecutor()
+        val providerFuture = ProcessCameraProvider.getInstance(ctx)
+        providerFuture.addListener({
+            val provider = providerFuture.get()
+            val selector = if (backCamera) CameraSelector.DEFAULT_BACK_CAMERA else CameraSelector.DEFAULT_FRONT_CAMERA
+            val preview = Preview.Builder().build().also { it.surfaceProvider = previewView.surfaceProvider }
+            val imageCapture = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                .setJpegQuality(98)
+                .build()
             val labeler = ImageLabeling.getClient(ImageLabelerOptions.DEFAULT_OPTIONS)
-            val analysis = ImageAnalysis.Builder().setTargetResolution(android.util.Size(640, 480))
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
+            val analysis = ImageAnalysis.Builder()
+                .setTargetResolution(android.util.Size(480, 360))
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
             analysis.setAnalyzer(executor) { proxy ->
-                val image = proxy.image
-                if (image == null) proxy.close() else {
-                    val (bins, mean) = calculateHistogram(proxy)
-                    ContextCompat.getMainExecutor(ctx).execute { onAnalysis(bins, mean) }
-                    labeler.process(InputImage.fromMediaImage(image, proxy.imageInfo.rotationDegrees))
-                        .addOnSuccessListener { found ->
-                            val top = found.sortedByDescending { it.confidence }.take(2)
-                            ContextCompat.getMainExecutor(ctx).execute { onLabels(if (top.isEmpty()) "AURA CAMERA" else top.joinToString(" · ") { it.text }) }
-                        }.addOnCompleteListener { proxy.close() }
+                val media = proxy.image
+                if (media == null) {
+                    proxy.close()
+                } else {
+                    val stats = calculateHistogram(proxy)
+                    ContextCompat.getMainExecutor(ctx).execute { onAnalysis(stats.first, stats.second) }
+                    labeler.process(InputImage.fromMediaImage(media, proxy.imageInfo.rotationDegrees))
+                        .addOnSuccessListener { labels ->
+                            val best = labels.maxByOrNull { it.confidence }
+                            val text = best?.text?.uppercase(Locale.getDefault()) ?: "ANALYZING SCENE"
+                            ContextCompat.getMainExecutor(ctx).execute { onAi("AI · $text") }
+                        }
+                        .addOnFailureListener {
+                            ContextCompat.getMainExecutor(ctx).execute { onAi("AI · LIVE ANALYSIS") }
+                        }
+                        .addOnCompleteListener { proxy.close() }
                 }
-            }
-            onCameraReady { flash, ratio ->
-                capture.flashMode = if (flash) ImageCapture.FLASH_MODE_ON else ImageCapture.FLASH_MODE_OFF
-                cameraRef?.cameraControl?.setZoomRatio(ratio)
             }
             try {
                 provider.unbindAll()
-                val camera = provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, capture, analysis)
-                cameraRef = camera
-                onCaptureReady {
-                    val file = File(ctx.cacheDir, "aura_${System.currentTimeMillis()}.jpg")
-                    capture.takePicture(ImageCapture.OutputFileOptions.Builder(file).build(), ContextCompat.getMainExecutor(ctx),
-                        object : ImageCapture.OnImageSavedCallback {
-                            override fun onImageSaved(output: ImageCapture.OutputFileResults) { onPhoto(file) }
-                            override fun onError(exception: ImageCaptureException) { onLabels("Capture failed: ${exception.message}") }
-                        })
+                val camera: Camera = provider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture, analysis)
+                onConfigure { flashMode, zoomRatio, ev ->
+                    imageCapture.flashMode = when (flashMode) {
+                        "ON" -> ImageCapture.FLASH_MODE_ON
+                        "AUTO" -> ImageCapture.FLASH_MODE_AUTO
+                        else -> ImageCapture.FLASH_MODE_OFF
+                    }
+                    camera.cameraControl.setZoomRatio(zoomRatio.coerceIn(camera.cameraInfo.zoomState.value?.minZoomRatio ?: 1f, camera.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f))
+                    val state = camera.cameraInfo.exposureState
+                    val steps = (ev / (state.exposureCompensationStep.toFloat().takeIf { it > 0f } ?: 1f)).toInt()
+                    camera.cameraControl.setExposureCompensationIndex(steps.coerceIn(state.exposureCompensationRange.lower, state.exposureCompensationRange.upper))
                 }
-            } catch (e: Exception) { onLabels("Camera unavailable: ${e.message}") }
+                onCaptureReady {
+                    val output = File(ctx.cacheDir, "aura_${System.currentTimeMillis()}.jpg")
+                    imageCapture.takePicture(
+                        ImageCapture.OutputFileOptions.Builder(output).build(),
+                        ContextCompat.getMainExecutor(ctx),
+                        object : ImageCapture.OnImageSavedCallback {
+                            override fun onImageSaved(results: ImageCapture.OutputFileResults) { onPhoto(output) }
+                            override fun onError(exception: ImageCaptureException) { onAi("CAPTURE ERROR · ${exception.message ?: "TRY AGAIN"}") }
+                        }
+                    )
+                }
+            } catch (e: Exception) {
+                onAi("CAMERA ERROR · ${e.message ?: "UNAVAILABLE"}")
+            }
         }, ContextCompat.getMainExecutor(ctx))
-        view
+        previewView
     })
 }
 
-private var cameraRef: Camera? = null
-
-private fun calculateHistogram(proxy: ImageProxy): Pair<List<Float>, Int> {
+private fun calculateHistogram(proxy: androidx.camera.core.ImageProxy): Pair<List<Float>, Int> {
     val plane = proxy.planes[0]
     val buffer = plane.buffer
-    val bins = IntArray(64)
+    val bins = IntArray(48)
     var sum = 0L
     var count = 0
-    val stepX = (proxy.width / 160).coerceAtLeast(1)
-    val stepY = (proxy.height / 120).coerceAtLeast(1)
+    val stepX = (proxy.width / 120).coerceAtLeast(1)
+    val stepY = (proxy.height / 90).coerceAtLeast(1)
     for (y in 0 until proxy.height step stepY) for (x in 0 until proxy.width step stepX) {
         val index = y * plane.rowStride + x * plane.pixelStride
         if (index < buffer.limit()) {
             val value = buffer.get(index).toInt() and 0xFF
-            bins[value * 64 / 256]++; sum += value; count++
+            bins[value * bins.size / 256]++
+            sum += value
+            count++
         }
     }
-    val maxBin = (bins.maxOrNull() ?: 1).coerceAtLeast(1).toFloat()
-    return bins.map { it / maxBin } to if (count == 0) 0 else (sum / count).toInt()
-}
-
-@Composable
-private fun Histogram(bins: List<Float>, modifier: Modifier = Modifier) {
-    androidx.compose.foundation.Canvas(modifier.background(Color(0xFF202126), RoundedCornerShape(8.dp)).padding(5.dp)) {
-        if (bins.isEmpty()) return@Canvas
-        val step = size.width / bins.size
-        bins.forEachIndexed { index, value ->
-            drawLine(Color(0xFFFFD36A), androidx.compose.ui.geometry.Offset(index * step, size.height),
-                androidx.compose.ui.geometry.Offset(index * step, size.height - value * size.height), strokeWidth = maxOf(1f, step * .7f))
-        }
-    }
+    val peak = (bins.maxOrNull() ?: 1).coerceAtLeast(1).toFloat()
+    return bins.map { it / peak } to if (count == 0) 0 else (sum / count).toInt()
 }
