@@ -101,6 +101,8 @@ private fun AuraCameraScreen() {
     var backCamera by remember { mutableStateOf(true) }
     var optionsOpen by remember { mutableStateOf(false) }
     var countdown by remember { mutableIntStateOf(0) }
+    var autoSave by remember { mutableStateOf(true) }
+    var auto4k by remember { mutableStateOf(false) }
     val worker = remember { Executors.newSingleThreadExecutor() }
 
     LaunchedEffect(Unit) { if (!permission) permissionRequest.launch(Manifest.permission.CAMERA) }
@@ -196,6 +198,8 @@ private fun AuraCameraScreen() {
                                 onConfigure = { configure = it },
                                 onAnalysis = { bins, mean -> histogram = bins; brightness = mean },
                                 sceneHint = sceneHint,
+                                autoSave = autoSave,
+                                auto4k = auto4k,
                                 onAi = { label ->
                                     aiText = label
                                     sceneHint = label.substringAfter("AI ·", "AUTO").trim().ifBlank { "AUTO" }
@@ -206,9 +210,16 @@ private fun AuraCameraScreen() {
                                         try {
                                             val bmp = BitmapFactory.decodeFile(file.absolutePath) ?: throw IllegalStateException("Photo decode failed")
                                             val edit = PhotoEnhancer.enhance(bmp, detectedScene)
+                                            val finalBitmap = if (auto4k && maxOf(edit.bitmap.width, edit.bitmap.height) < 3840) AuraSuperResolution.upscaleTo4k(context, edit.bitmap) else edit.bitmap
+                                            val savedOriginal = if (autoSave) saveBitmap(context, bmp, "AURA_Original") else false
+                                            val savedEnhanced = if (autoSave) saveBitmap(context, finalBitmap, "AURA_AI_Enhanced") else false
                                             ContextCompat.getMainExecutor(context).execute {
-                                                original = bmp; enhanced = edit.bitmap
-                                                resultText = "Enhanced · exposure ${edit.report.appliedExposure}× · fine detail"
+                                                original = bmp; enhanced = finalBitmap
+                                                resultText = buildString {
+                                                    append("Auto-enhanced · ${edit.report.appliedExposure}× exposure")
+                                                    if (auto4k && maxOf(finalBitmap.width, finalBitmap.height) >= 3840) append(" · AI 4K")
+                                                    if (autoSave) append(if (savedOriginal && savedEnhanced) " · saved to Pictures/AURA" else " · auto-save failed")
+                                                }
                                                 processing = false
                                             }
                                         } catch (e: Exception) {
@@ -310,6 +321,10 @@ private fun AuraCameraScreen() {
                     ChoiceRow(listOf("4:3", "16:9", "1:1"), ratio) { ratio = it }
                     SettingLabel("COMPOSITION GRID")
                     ChoiceRow(listOf("OFF", "ON"), if (grid) "ON" else "OFF") { grid = it == "ON" }
+                    SettingLabel("AUTOMATIC FEATURES")
+                    SettingToggle("Auto AI enhancement", "Improve every photo after capture", true, { })
+                    SettingToggle("Auto-save photos", "Save original and enhanced copies", autoSave, { autoSave = it })
+                    SettingToggle("Auto 4K AI upscale", "Upscale smaller photos after capture; uses more time and memory", auto4k, { auto4k = it })
                     Text("Selected ratio: $ratio", color = Soft, fontSize = 11.sp, modifier = Modifier.padding(top = 16.dp))
                     Text("The current camera sensor and Android driver determine available HDR, optical zoom and manual exposure capabilities.", color = Soft, fontSize = 10.sp, modifier = Modifier.padding(top = 10.dp))
                 }
@@ -387,6 +402,17 @@ private fun SettingLabel(text: String) {
 }
 
 @Composable
+private fun SettingToggle(title: String, description: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text(description, color = Soft, fontSize = 10.sp)
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
 private fun ChoiceRow(items: List<String>, selected: String, onSelect: (String) -> Unit) {
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(Color(0xFF25272D)).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         items.forEach { item ->
@@ -441,11 +467,14 @@ private fun CameraPreview(
     onConfigure: ((String, Float, Float) -> Unit) -> Unit,
     onAnalysis: (List<Float>, Int) -> Unit,
     sceneHint: String,
+    autoSave: Boolean,
+    auto4k: Boolean,
     onAi: (String) -> Unit,
     onPhoto: (File, String) -> Unit
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val latestSceneHint by rememberUpdatedState(sceneHint)
+    val latestOnPhoto by rememberUpdatedState(onPhoto)
     AndroidView(modifier = modifier, factory = { ctx ->
         val previewView = PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FILL_CENTER }
         val executor = Executors.newSingleThreadExecutor()
@@ -502,7 +531,7 @@ private fun CameraPreview(
                         ImageCapture.OutputFileOptions.Builder(output).build(),
                         ContextCompat.getMainExecutor(ctx),
                         object : ImageCapture.OnImageSavedCallback {
-                            override fun onImageSaved(results: ImageCapture.OutputFileResults) { onPhoto(output, latestSceneHint) }
+                            override fun onImageSaved(results: ImageCapture.OutputFileResults) { latestOnPhoto(output, latestSceneHint) }
                             override fun onError(exception: ImageCaptureException) { onAi("CAPTURE ERROR · ${exception.message ?: "TRY AGAIN"}") }
                         }
                     )
