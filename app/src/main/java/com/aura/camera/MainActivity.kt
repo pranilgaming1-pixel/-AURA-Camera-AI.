@@ -322,7 +322,7 @@ private fun AuraCameraScreen() {
                     SettingLabel("COMPOSITION GRID")
                     ChoiceRow(listOf("OFF", "ON"), if (grid) "ON" else "OFF") { grid = it == "ON" }
                     SettingLabel("AUTOMATIC FEATURES")
-                    SettingToggle("Auto AI enhancement", "Improve every photo after capture", true, { })
+                    Text("AUTO AI ENHANCEMENT · ALWAYS ON", color = Gold, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 10.dp))
                     SettingToggle("Auto-save photos", "Save original and enhanced copies", autoSave, { autoSave = it })
                     SettingToggle("Auto 4K AI upscale", "Upscale smaller photos after capture; uses more time and memory", auto4k, { auto4k = it })
                     Text("Selected ratio: $ratio", color = Soft, fontSize = 11.sp, modifier = Modifier.padding(top = 16.dp))
