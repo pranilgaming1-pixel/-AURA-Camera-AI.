@@ -32,11 +32,12 @@ object PhotoEnhancer {
         var sum = 0L
         var sumSquared = 0.0
         var samples = 0
-        val sampleStep = max(1, width * height / 18000)
+        val sampleXStep = max(1, width / 120)
+        val sampleYStep = max(1, height / 150)
         val sampleRow = IntArray(width)
-        for (y in 0 until height) {
+        for (y in 0 until height step sampleYStep) {
             source.getPixels(sampleRow, 0, width, 0, y, width, 1)
-            for (x in 0 until width step sampleStep) {
+            for (x in 0 until width step sampleXStep) {
                 val value = luma(sampleRow[x])
                 histogram[value]++
                 sum += value
@@ -154,14 +155,6 @@ object PhotoEnhancer {
             }
             output.setPixels(outputRow, 0, width, 0, y, width, 1)
 
-            // Rotate row buffers rather than allocating a new array each row.
-            if (y < height - 1) {
-                val oldPrevious = previous.copyOf()
-                current.copyInto(previous)
-                next.copyInto(current)
-                source.getPixels(next, 0, width, 0, min(height - 1, y + 2), width, 1)
-                oldPrevious.fill(0)
-            }
         }
         return Result(output, Report(mean, contrast, exposure * sceneExposure, contrastGain, sharpen))
     }
