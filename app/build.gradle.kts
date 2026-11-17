@@ -48,4 +48,5 @@ dependencies {
     implementation("androidx.camera:camera-view:$cameraX")
 
     implementation("com.google.mlkit:image-labeling:17.0.9")
+    implementation("org.tensorflow:tensorflow-lite:2.17.0")
 }
