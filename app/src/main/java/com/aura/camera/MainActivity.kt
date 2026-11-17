@@ -198,8 +198,6 @@ private fun AuraCameraScreen() {
                                 onConfigure = { configure = it },
                                 onAnalysis = { bins, mean -> histogram = bins; brightness = mean },
                                 sceneHint = sceneHint,
-                                autoSave = autoSave,
-                                auto4k = auto4k,
                                 onAi = { label ->
                                     aiText = label
                                     sceneHint = label.substringAfter("AI ·", "AUTO").trim().ifBlank { "AUTO" }
@@ -467,8 +465,6 @@ private fun CameraPreview(
     onConfigure: ((String, Float, Float) -> Unit) -> Unit,
     onAnalysis: (List<Float>, Int) -> Unit,
     sceneHint: String,
-    autoSave: Boolean,
-    auto4k: Boolean,
     onAi: (String) -> Unit,
     onPhoto: (File, String) -> Unit
 ) {
