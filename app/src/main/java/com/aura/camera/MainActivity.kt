@@ -101,8 +101,9 @@ private fun AuraCameraScreen() {
     var backCamera by remember { mutableStateOf(true) }
     var optionsOpen by remember { mutableStateOf(false) }
     var countdown by remember { mutableIntStateOf(0) }
-    var autoSave by remember { mutableStateOf(true) }
-    var auto4k by remember { mutableStateOf(false) }
+    val cameraPrefs = remember { context.getSharedPreferences("aura_camera_settings", android.content.Context.MODE_PRIVATE) }
+    var autoSave by remember { mutableStateOf(cameraPrefs.getBoolean("auto_save", true)) }
+    var auto4k by remember { mutableStateOf(cameraPrefs.getBoolean("auto_4k", false)) }
     val worker = remember { Executors.newSingleThreadExecutor() }
 
     LaunchedEffect(Unit) { if (!permission) permissionRequest.launch(Manifest.permission.CAMERA) }
@@ -321,8 +322,8 @@ private fun AuraCameraScreen() {
                     ChoiceRow(listOf("OFF", "ON"), if (grid) "ON" else "OFF") { grid = it == "ON" }
                     SettingLabel("AUTOMATIC FEATURES")
                     Text("AUTO AI ENHANCEMENT · ALWAYS ON", color = Gold, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 10.dp))
-                    SettingToggle("Auto-save photos", "Save original and enhanced copies", autoSave, { autoSave = it })
-                    SettingToggle("Auto 4K AI upscale", "Upscale smaller photos after capture; uses more time and memory", auto4k, { auto4k = it })
+                    SettingToggle("Auto-save photos", "Save original and enhanced copies", autoSave, { autoSave = it; cameraPrefs.edit().putBoolean("auto_save", it).apply() })
+                    SettingToggle("Auto 4K AI upscale", "Upscale smaller photos after capture; uses more time and memory", auto4k, { auto4k = it; cameraPrefs.edit().putBoolean("auto_4k", it).apply() })
                     Text("Selected ratio: $ratio", color = Soft, fontSize = 11.sp, modifier = Modifier.padding(top = 16.dp))
                     Text("The current camera sensor and Android driver determine available HDR, optical zoom and manual exposure capabilities.", color = Soft, fontSize = 10.sp, modifier = Modifier.padding(top = 10.dp))
                 }
