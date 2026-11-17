@@ -81,7 +81,7 @@ private fun AuraCameraScreen() {
     var permission by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }
     val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { permission = it }
     var capture by remember { mutableStateOf<(() -> Unit)?>(null) }
-    var configure by remember { mutableStateOf<((String, Float, Float) -> Unit)?>(null) }
+    var configure by remember { mutableStateOf<((String, Float, Float, Boolean, Int) -> Unit)?>(null) }
     var aiText by remember { mutableStateOf("AI CAMERA READY") }
     var sceneHint by remember { mutableStateOf("AUTO") }
     var brightness by remember { mutableIntStateOf(0) }
@@ -104,10 +104,11 @@ private fun AuraCameraScreen() {
     val cameraPrefs = remember { context.getSharedPreferences("aura_camera_settings", android.content.Context.MODE_PRIVATE) }
     var autoSave by remember { mutableStateOf(cameraPrefs.getBoolean("auto_save", true)) }
     var auto4k by remember { mutableStateOf(cameraPrefs.getBoolean("auto_4k", false)) }
+    var aiAutoCamera by remember { mutableStateOf(cameraPrefs.getBoolean("ai_auto_camera", true)) }
     val worker = remember { Executors.newSingleThreadExecutor() }
 
     LaunchedEffect(Unit) { if (!permission) permissionRequest.launch(Manifest.permission.CAMERA) }
-    LaunchedEffect(flash, zoom, exposure) { configure?.invoke(flash, zoom, exposure) }
+    LaunchedEffect(flash, zoom, exposure, aiAutoCamera, brightness) { configure?.invoke(flash, zoom, exposure, aiAutoCamera, brightness) }
 
     val galleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
@@ -180,6 +181,11 @@ private fun AuraCameraScreen() {
                         Text("COMPUTATIONAL CAMERA", color = Soft, fontSize = 8.sp, letterSpacing = 1.5.sp)
                     }
                     Spacer(Modifier.weight(1f))
+                    TopChip(if (aiAutoCamera) "AI AUTO · ON" else "AI AUTO · OFF", aiAutoCamera) {
+                        aiAutoCamera = !aiAutoCamera
+                        cameraPrefs.edit().putBoolean("ai_auto_camera", aiAutoCamera).apply()
+                    }
+                    Spacer(Modifier.width(6.dp))
                     TopChip(flash, flash != "OFF") {
                         flash = when (flash) { "AUTO" -> "ON"; "ON" -> "OFF"; else -> "AUTO" }
                     }
@@ -197,7 +203,8 @@ private fun AuraCameraScreen() {
                                 backCamera = backCamera,
                                 onCaptureReady = { capture = it },
                                 onConfigure = { configure = it },
-                                onAnalysis = { bins, mean -> histogram = bins; brightness = mean },
+                                onAnalysis = { bins, mean -> histogram = bins; if (kotlin.math.abs(mean - brightness) >= 8) brightness = mean },
+                                
                                 sceneHint = sceneHint,
                                 onAi = { label ->
                                     aiText = label
@@ -320,6 +327,8 @@ private fun AuraCameraScreen() {
                     ChoiceRow(listOf("4:3", "16:9", "1:1"), ratio) { ratio = it }
                     SettingLabel("COMPOSITION GRID")
                     ChoiceRow(listOf("OFF", "ON"), if (grid) "ON" else "OFF") { grid = it == "ON" }
+                    SettingLabel("AI AUTO CAMERA")
+                    SettingToggle("Live AI camera tuning", "Adjust exposure automatically from live scene brightness", aiAutoCamera, { aiAutoCamera = it; cameraPrefs.edit().putBoolean("ai_auto_camera", it).apply() })
                     SettingLabel("AUTOMATIC FEATURES")
                     Text("AUTO AI ENHANCEMENT · ALWAYS ON", color = Gold, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 10.dp))
                     SettingToggle("Auto-save photos", "Save original and enhanced copies", autoSave, { autoSave = it; cameraPrefs.edit().putBoolean("auto_save", it).apply() })
@@ -463,7 +472,7 @@ private fun CameraPreview(
     modifier: Modifier,
     backCamera: Boolean,
     onCaptureReady: (() -> Unit) -> Unit,
-    onConfigure: ((String, Float, Float) -> Unit) -> Unit,
+    onConfigure: ((String, Float, Float, Boolean, Int) -> Unit) -> Unit,
     onAnalysis: (List<Float>, Int) -> Unit,
     sceneHint: String,
     onAi: (String) -> Unit,
@@ -518,7 +527,8 @@ private fun CameraPreview(
             try {
                 provider.unbindAll()
                 val camera: Camera = provider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture, analysis)
-                onConfigure { flashMode, zoomRatio, ev ->
+                var lastExposureIndex = Int.MIN_VALUE
+                onConfigure { flashMode, zoomRatio, ev, aiAuto, liveBrightness ->
                     imageCapture.flashMode = when (flashMode) {
                         "ON" -> ImageCapture.FLASH_MODE_ON
                         "AUTO" -> ImageCapture.FLASH_MODE_AUTO
@@ -526,8 +536,20 @@ private fun CameraPreview(
                     }
                     camera.cameraControl.setZoomRatio(zoomRatio.coerceIn(camera.cameraInfo.zoomState.value?.minZoomRatio ?: 1f, camera.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f))
                     val state = camera.cameraInfo.exposureState
-                    val steps = (ev / (state.exposureCompensationStep.toFloat().takeIf { it > 0f } ?: 1f)).toInt()
-                    camera.cameraControl.setExposureCompensationIndex(steps.coerceIn(state.exposureCompensationRange.lower, state.exposureCompensationRange.upper))
+                    val autoEv = if (aiAuto) when {
+                        liveBrightness < 48 -> 1.5f
+                        liveBrightness < 75 -> 1.0f
+                        liveBrightness < 105 -> 0.5f
+                        liveBrightness > 220 -> -1.0f
+                        liveBrightness > 195 -> -0.5f
+                        else -> 0f
+                    } else ev
+                    val step = state.exposureCompensationStep.toFloat().takeIf { it > 0f } ?: 1f
+                    val steps = (autoEv / step).toInt().coerceIn(state.exposureCompensationRange.lower, state.exposureCompensationRange.upper)
+                    if (steps != lastExposureIndex) {
+                        lastExposureIndex = steps
+                        camera.cameraControl.setExposureCompensationIndex(steps)
+                    }
                 }
                 onCaptureReady {
                     val output = File(ctx.cacheDir, "aura_${System.currentTimeMillis()}.jpg")
