@@ -488,6 +488,7 @@ private fun CameraPreview(
                 .setJpegQuality(98)
                 .build()
             val labeler = ImageLabeling.getClient(ImageLabelerOptions.DEFAULT_OPTIONS)
+            var lastSceneAnalysis = 0L
             val analysis = ImageAnalysis.Builder()
                 .setTargetResolution(android.util.Size(480, 360))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -499,16 +500,22 @@ private fun CameraPreview(
                 } else {
                     val stats = calculateHistogram(proxy)
                     ContextCompat.getMainExecutor(ctx).execute { onAnalysis(stats.first, stats.second) }
-                    labeler.process(InputImage.fromMediaImage(media, proxy.imageInfo.rotationDegrees))
-                        .addOnSuccessListener { labels ->
-                            val best = labels.maxByOrNull { it.confidence }
-                            val text = best?.text?.uppercase(Locale.getDefault()) ?: "ANALYZING SCENE"
-                            ContextCompat.getMainExecutor(ctx).execute { onAi("AI · $text") }
-                        }
-                        .addOnFailureListener {
-                            ContextCompat.getMainExecutor(ctx).execute { onAi("AI · LIVE ANALYSIS") }
-                        }
-                        .addOnCompleteListener { proxy.close() }
+                    val now = System.currentTimeMillis()
+                    if (now - lastSceneAnalysis >= 900L) {
+                        lastSceneAnalysis = now
+                        labeler.process(InputImage.fromMediaImage(media, proxy.imageInfo.rotationDegrees))
+                            .addOnSuccessListener { labels ->
+                                val best = labels.maxByOrNull { it.confidence }
+                                val text = best?.text?.uppercase(Locale.getDefault()) ?: "ANALYZING SCENE"
+                                ContextCompat.getMainExecutor(ctx).execute { onAi("AI · $text") }
+                            }
+                            .addOnFailureListener {
+                                ContextCompat.getMainExecutor(ctx).execute { onAi("AI · LIVE ANALYSIS") }
+                            }
+                            .addOnCompleteListener { proxy.close() }
+                    } else {
+                        proxy.close()
+                    }
                 }
             }
             try {
