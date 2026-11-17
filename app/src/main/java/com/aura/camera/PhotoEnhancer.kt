@@ -123,7 +123,8 @@ object PhotoEnhancer {
                 val smoothG = greenSum / weightSum.coerceAtLeast(0.001f)
                 val smoothB = blueSum / weightSum.coerceAtLeast(0.001f)
                 val texture = kotlin.math.abs(centerY - localLuma / localCount)
-                val denoiseBase = if (nightScene) 0.25f else 0.20f\n                val denoiseMix = (denoiseBase - texture / 180f).coerceIn(0.04f, if (nightScene) 0.22f else 0.17f)
+                val denoiseBase = if (nightScene) 0.25f else 0.20f
+                val denoiseMix = (denoiseBase - texture / 180f).coerceIn(0.04f, if (nightScene) 0.22f else 0.17f)
 
                 var r = Color.red(center) * (1f - denoiseMix) + smoothR * denoiseMix
                 var g = Color.green(center) * (1f - denoiseMix) + smoothG * denoiseMix
