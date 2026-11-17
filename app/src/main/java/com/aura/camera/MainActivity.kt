@@ -135,11 +135,37 @@ private fun AuraCameraScreen() {
                 showEnhanced = showEnhanced,
                 onToggle = { showEnhanced = it },
                 message = resultText,
-                onRetake = { original = null; enhanced = null; showEnhanced = true },
+                isUpscaling = processing,
+                onRetake = { if (!processing) { original = null; enhanced = null; showEnhanced = true } },
+                onUpscale = {
+                    if (!processing) {
+                        val inputBitmap = enhanced!!
+                        processing = true
+                        resultText = "Preparing AURA AI super-resolution model..."
+                        worker.execute {
+                            try {
+                                val upscaled = AuraSuperResolution.upscaleTo4k(context, inputBitmap)
+                                ContextCompat.getMainExecutor(context).execute {
+                                    enhanced = upscaled
+                                    showEnhanced = true
+                                    resultText = "AI super-resolution complete · ${upscaled.width} × ${upscaled.height}"
+                                    processing = false
+                                }
+                            } catch (e: Exception) {
+                                ContextCompat.getMainExecutor(context).execute {
+                                    resultText = "AI upscale failed: ${e.message ?: "Please retry"}"
+                                    processing = false
+                                }
+                            }
+                        }
+                    }
+                },
                 onSave = {
-                    val first = saveBitmap(context, original!!, "AURA_Original")
-                    val second = saveBitmap(context, enhanced!!, "AURA_Enhanced")
-                    resultText = if (first && second) "Saved both photos to Pictures/AURA" else "Could not save. Check available storage."
+                    if (!processing) {
+                        val first = saveBitmap(context, original!!, "AURA_Original")
+                        val second = saveBitmap(context, enhanced!!, "AURA_AI_Enhanced")
+                        resultText = if (first && second) "Saved original and AI-enhanced photos to Pictures/AURA" else "Could not save. Check available storage."
+                    }
                 }
             )
         } else {
@@ -293,7 +319,7 @@ private fun AuraCameraScreen() {
 }
 
 @Composable
-private fun ResultScreen(original: Bitmap, enhanced: Bitmap, showEnhanced: Boolean, onToggle: (Boolean) -> Unit, message: String, onRetake: () -> Unit, onSave: () -> Unit) {
+private fun ResultScreen(original: Bitmap, enhanced: Bitmap, showEnhanced: Boolean, onToggle: (Boolean) -> Unit, message: String, isUpscaling: Boolean, onRetake: () -> Unit, onUpscale: () -> Unit, onSave: () -> Unit) {
     Column(Modifier.fillMaxSize().background(Black).padding(18.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("AURA", color = White, fontSize = 22.sp, fontWeight = FontWeight.Bold, letterSpacing = 3.sp)
@@ -309,8 +335,16 @@ private fun ResultScreen(original: Bitmap, enhanced: Bitmap, showEnhanced: Boole
             FilterChip(selected = !showEnhanced, onClick = { onToggle(false) }, label = { Text("ORIGINAL") })
             FilterChip(selected = showEnhanced, onClick = { onToggle(true) }, label = { Text("AURA ENHANCED") })
         }
-        Button(onClick = onSave, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = White, contentColor = Black)) {
-            Text("SAVE BOTH PHOTOS", fontWeight = FontWeight.Bold)
+        OutlinedButton(
+            onClick = onUpscale,
+            enabled = !isUpscaling && maxOf(original.width, original.height) < 3840,
+            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = Gold)
+        ) {
+            Text(if (isUpscaling) "AI SUPER-RESOLUTION RUNNING..." else "✦ AI UPSCALE TO 4K", fontWeight = FontWeight.Bold)
+        }
+        Button(onClick = onSave, enabled = !isUpscaling, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = White, contentColor = Black)) {
+            Text("SAVE ORIGINAL + AI PHOTO", fontWeight = FontWeight.Bold)
         }
     }
 }
