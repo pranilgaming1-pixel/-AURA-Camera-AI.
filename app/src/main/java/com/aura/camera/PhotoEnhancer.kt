@@ -85,6 +85,10 @@ object PhotoEnhancer {
             else -> 1f
         }).coerceIn(0.07f, 0.24f)
 
+        // Precompute the bilateral range weights once. Calling exp() for every
+        // neighbour of every pixel was a major CPU bottleneck on mid-range phones.
+        val rangeWeights = FloatArray(256) { difference -> exp(-difference / 22f) }
+
         // Stream three source rows through the denoise/detail pass. This keeps
         // peak working memory low enough for high-megapixel photos on mid-range phones.
         val previous = IntArray(width)
@@ -114,7 +118,7 @@ object PhotoEnhancer {
                         val neighbour = row[nx]
                         val difference = kotlin.math.abs(luma(neighbour) - centerY)
                         val spatial = if (dx == 0 && dy == 0) 1f else 0.72f
-                        val weight = spatial * exp(-difference / 22f)
+                        val weight = spatial * rangeWeights[difference.toInt().coerceIn(0, 255)]
                         redSum += Color.red(neighbour) * weight
                         greenSum += Color.green(neighbour) * weight
                         blueSum += Color.blue(neighbour) * weight
