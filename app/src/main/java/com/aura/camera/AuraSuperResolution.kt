@@ -84,9 +84,9 @@ object AuraSuperResolution {
                     val validHeight = min(TILE, source.height - tileY)
                     val tilePixels = IntArray(TILE * SCALE * TILE * SCALE)
                     for (i in tilePixels.indices) {
-                        val red = (output.float.coerceIn(0f, 1f) * 255f).roundToInt()
-                        val green = (output.float.coerceIn(0f, 1f) * 255f).roundToInt()
-                        val blue = (output.float.coerceIn(0f, 1f) * 255f).roundToInt()
+                        val red = (output.getFloat().coerceIn(0f, 1f) * 255f).roundToInt()
+                        val green = (output.getFloat().coerceIn(0f, 1f) * 255f).roundToInt()
+                        val blue = (output.getFloat().coerceIn(0f, 1f) * 255f).roundToInt()
                         tilePixels[i] = Color.rgb(red, green, blue)
                     }
                     val tileBitmap = Bitmap.createBitmap(tilePixels, TILE * SCALE, TILE * SCALE, Bitmap.Config.ARGB_8888)
